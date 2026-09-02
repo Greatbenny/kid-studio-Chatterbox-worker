@@ -1,0 +1,11 @@
+{
+  "input": {
+    "operation": "synthesize",
+    "text": "Hello! Let us learn the alphabet together.",
+    "language": "en",
+    "seed": 42,
+    "exaggeration": 0.5,
+    "temperature": 0.8,
+    "cfg_weight": 0.5
+  }
+}

@@ -20,7 +20,7 @@ HF_HOME = Path(os.getenv("HF_HOME", "/runpod-volume/huggingface"))
 TMP_ROOT = Path(os.getenv("TMPDIR", "/runpod-volume/tmp"))
 MAX_TEXT_CHARS = 600
 LANGUAGES = {
-    "auto": "Auto", "zh": "Chinese", "en": "English",
+    "auto": "Auto", "unspecified": "Auto", "zh": "Chinese", "en": "English",
     "ja": "Japanese", "ko": "Korean", "de": "German",
     "fr": "French", "ru": "Russian", "pt": "Portuguese",
     "es": "Spanish", "it": "Italian",

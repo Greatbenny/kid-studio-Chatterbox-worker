@@ -17,7 +17,7 @@ import runpod
 import torch
 
 SERVICE = "kid-studio-chatterbox-worker"
-WORKER_BUILD = "chatterbox-multilingual-v3-1"
+WORKER_BUILD = "chatterbox-multilingual-v3-2"
 MODEL_NAME = "ResembleAI/chatterbox"
 MODEL_LICENSE = "MIT"
 MODEL_VARIANT = os.getenv("CHATTERBOX_T3_MODEL", "v3")
@@ -25,6 +25,10 @@ SUPPORTED_LANGUAGES = {
     "ar", "da", "de", "el", "en", "es", "fi", "fr", "he", "hi",
     "it", "ja", "ko", "ms", "nl", "no", "pl", "pt", "ru", "sv",
     "sw", "tr", "zh",
+}
+REFERENCE_AUTHORIZATIONS = {
+    "consented_human_clone",
+    "system_generated_identity",
 }
 MAX_REFERENCE_BYTES = 24 * 1024 * 1024
 MAX_TEXT_CHARS = 600
@@ -88,6 +92,8 @@ def _health() -> dict[str, Any]:
         "supported_languages": sorted(SUPPORTED_LANGUAGES),
         "voice_cloning": True,
         "voice_clone_consent_required": True,
+        "reference_authorization_modes": sorted(REFERENCE_AUTHORIZATIONS),
+        "system_generated_identity_reference": True,
         "watermarked": True,
         "loaded": _model is not None,
         "generations_since_load": _generation_count,
@@ -184,14 +190,39 @@ def _download_reference(value: str) -> bytes:
 def _reference_file(
     value: Any,
     consent: Any,
-) -> tuple[str | None, str | None]:
+    authorization: Any,
+) -> tuple[str | None, str | None, str | None]:
     if value is None or value == "":
-        return None, None
+        return None, None, None
     if not isinstance(value, str):
         raise ValueError("reference_audio must be a string.")
-    if consent is not True:
+
+    auth = str(authorization or "").strip().lower()
+    if not auth:
+        # Backward-compatible human-clone requests keep working only when
+        # explicit consent is present. New synthetic-identity reuse must
+        # always declare its authorization mode explicitly.
+        if consent is True:
+            auth = "consented_human_clone"
+        else:
+            raise ValueError(
+                "reference_authorization is required when reference_audio is used."
+            )
+
+    if auth not in REFERENCE_AUTHORIZATIONS:
         raise ValueError(
-            "voice_clone_consent=true is required when cloning a voice."
+            "reference_authorization must be consented_human_clone or "
+            "system_generated_identity."
+        )
+
+    if auth == "consented_human_clone" and consent is not True:
+        raise ValueError(
+            "voice_clone_consent=true is required for a consented human clone."
+        )
+
+    if auth == "system_generated_identity" and consent is True:
+        raise ValueError(
+            "system_generated_identity must not assert human voice-clone consent."
         )
 
     raw = _download_reference(value)
@@ -204,7 +235,7 @@ def _reference_file(
     )
     try:
         handle.write(raw)
-        return handle.name, digest
+        return handle.name, digest, auth
     finally:
         handle.close()
 
@@ -266,11 +297,19 @@ def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
         1.2,
     )
 
-    reference_path, reference_sha = _reference_file(
+    reference_path, reference_sha, reference_authorization = _reference_file(
         data.get("reference_audio"),
         data.get("voice_clone_consent"),
+        data.get("reference_authorization"),
     )
-    cloned = reference_path is not None
+    cloned = (
+        reference_path is not None
+        and reference_authorization == "consented_human_clone"
+    )
+    synthetic_identity = (
+        reference_path is not None
+        and reference_authorization == "system_generated_identity"
+    )
 
     random.seed(seed)
     np.random.seed(seed)
@@ -314,8 +353,12 @@ def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
         "duration_seconds": round(duration, 3),
         "seed": seed,
         "voice_cloned": cloned,
+        "system_generated_identity_reference": synthetic_identity,
+        "reference_authorization": reference_authorization,
         "voice_reference_sha256": reference_sha,
-        "consent_asserted": cloned,
+        "consent_asserted": (
+            cloned and data.get("voice_clone_consent") is True
+        ),
         "watermarked": True,
         "inference_ms": inference_ms,
         "mime_type": "audio/wav",

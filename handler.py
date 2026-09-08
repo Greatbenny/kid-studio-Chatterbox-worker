@@ -7,6 +7,7 @@ import random
 import secrets
 import tempfile
 import time
+import traceback
 import wave
 from pathlib import Path
 from typing import Any
@@ -412,6 +413,7 @@ def handler(job: dict[str, Any]) -> dict[str, Any]:
             "worker_build": WORKER_BUILD,
             "error": str(exc),
             "error_type": type(exc).__name__,
+            "traceback": traceback.format_exc(),
         }
 
 

@@ -1,4 +1,5 @@
 runpod==1.7.13
 chatterbox-tts==0.1.7
+resemble-perth==1.0.1
 soundfile==0.13.1
 requests==2.32.5

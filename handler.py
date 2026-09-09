@@ -19,7 +19,7 @@ import runpod
 import torch
 
 SERVICE = "kid-studio-chatterbox-worker"
-WORKER_BUILD = "chatterbox-multilingual-v3-5"
+WORKER_BUILD = "chatterbox-multilingual-v3-6"
 MODEL_NAME = "ResembleAI/chatterbox"
 MODEL_LICENSE = "MIT"
 MODEL_VARIANT = os.getenv("CHATTERBOX_T3_MODEL", "v3")
@@ -34,6 +34,14 @@ REFERENCE_AUTHORIZATIONS = {
 }
 MAX_REFERENCE_BYTES = 24 * 1024 * 1024
 MAX_TEXT_CHARS = 600
+MAX_INTERNAL_ATTEMPTS = max(
+    1,
+    int(os.getenv("CHATTERBOX_MAX_INTERNAL_ATTEMPTS", "3")),
+)
+PREMATURE_EOS_SECONDS = max(
+    0.05,
+    float(os.getenv("CHATTERBOX_PREMATURE_EOS_SECONDS", "0.5")),
+)
 RELOAD_AFTER_JOBS = max(
     1,
     int(os.getenv("CHATTERBOX_RELOAD_AFTER_JOBS", "10")),
@@ -102,6 +110,8 @@ def _health() -> dict[str, Any]:
         "loaded": _model is not None,
         "generations_since_load": _generation_count,
         "reload_after_jobs": RELOAD_AFTER_JOBS,
+        "max_internal_attempts": MAX_INTERNAL_ATTEMPTS,
+        "premature_eos_seconds": PREMATURE_EOS_SECONDS,
         "gpu": _gpu(),
         "storage": _storage(),
     }
@@ -274,6 +284,23 @@ def _wav_bytes(audio: Any, sample_rate: int) -> tuple[bytes, float]:
     return output.getvalue(), array.size / float(sample_rate)
 
 
+def _likely_premature_eos(text: str, duration: float) -> bool:
+    # This guard is intentionally narrow. It is not a text-length-to-duration
+    # estimator and does not reject short expressive utterances such as sighs.
+    # It only retries sub-half-second results when the requested text clearly
+    # contains multiple lexical words, which is the failure mode observed from
+    # Chatterbox sampling EOS almost immediately.
+    words = [part for part in text.replace("-", " ").split() if any(ch.isalpha() for ch in part)]
+    return len(words) >= 4 and duration < PREMATURE_EOS_SECONDS
+
+
+def _set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    torch.cuda.manual_seed_all(seed)
+
+
 def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
     global _generation_count
 
@@ -324,27 +351,50 @@ def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
         and reference_authorization == "system_generated_identity"
     )
 
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    attempt_seeds = []
+    attempt_durations = []
+    premature_eos_retry = False
 
     try:
         model = _load_model()
         started = time.perf_counter()
-        audio = model.generate(
-            text,
-            language_id=language,
-            audio_prompt_path=reference_path,
-            exaggeration=exaggeration,
-            temperature=temperature,
-            cfg_weight=cfg_weight,
-            repetition_penalty=repetition_penalty,
-        )
+
+        raw = b""
+        duration = 0.0
+        final_seed = seed
+
+        for attempt in range(MAX_INTERNAL_ATTEMPTS):
+            attempt_seed = seed if attempt == 0 else secrets.randbelow(2**31)
+            attempt_seeds.append(attempt_seed)
+            final_seed = attempt_seed
+            _set_seed(attempt_seed)
+
+            audio = model.generate(
+                text,
+                language_id=language,
+                audio_prompt_path=reference_path,
+                exaggeration=exaggeration,
+                temperature=temperature,
+                cfg_weight=cfg_weight,
+                repetition_penalty=repetition_penalty,
+            )
+            raw, duration = _wav_bytes(audio, int(model.sr))
+            attempt_durations.append(round(duration, 3))
+
+            if not _likely_premature_eos(text, duration):
+                break
+
+            premature_eos_retry = True
+
         inference_ms = round(
             (time.perf_counter() - started) * 1000
         )
-        raw, duration = _wav_bytes(audio, int(model.sr))
+
+        if _likely_premature_eos(text, duration):
+            raise RuntimeError(
+                "Chatterbox repeatedly terminated speech generation prematurely."
+            )
+
         _generation_count += 1
     finally:
         if reference_path:
@@ -365,7 +415,12 @@ def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
         "language": language,
         "sample_rate": int(model.sr),
         "duration_seconds": round(duration, 3),
-        "seed": seed,
+        "seed": final_seed,
+        "initial_seed": seed,
+        "generation_attempts": len(attempt_seeds),
+        "attempt_seeds": attempt_seeds,
+        "attempt_durations_seconds": attempt_durations,
+        "premature_eos_retry": premature_eos_retry,
         "voice_cloned": cloned,
         "system_generated_identity_reference": synthetic_identity,
         "reference_authorization": reference_authorization,

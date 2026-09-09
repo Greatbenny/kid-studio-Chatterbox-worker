@@ -1,6 +1,7 @@
 import base64
 import gc
 import hashlib
+import inspect
 import io
 import os
 import random
@@ -18,7 +19,7 @@ import runpod
 import torch
 
 SERVICE = "kid-studio-chatterbox-worker"
-WORKER_BUILD = "chatterbox-multilingual-v3-4"
+WORKER_BUILD = "chatterbox-multilingual-v3-5"
 MODEL_NAME = "ResembleAI/chatterbox"
 MODEL_LICENSE = "MIT"
 MODEL_VARIANT = os.getenv("CHATTERBOX_T3_MODEL", "v3")
@@ -43,6 +44,7 @@ TMP_ROOT = Path(os.getenv("TMPDIR", "/runpod-volume/tmp"))
 
 _model: Any = None
 _generation_count = 0
+_model_load_mode = "not_loaded"
 
 
 def _ensure_storage() -> None:
@@ -89,6 +91,7 @@ def _health() -> dict[str, Any]:
         "worker_build": WORKER_BUILD,
         "model": MODEL_NAME,
         "model_variant": MODEL_VARIANT,
+        "model_load_mode": _model_load_mode,
         "model_license": MODEL_LICENSE,
         "supported_languages": sorted(SUPPORTED_LANGUAGES),
         "voice_cloning": True,
@@ -105,9 +108,10 @@ def _health() -> dict[str, Any]:
 
 
 def _unload() -> None:
-    global _model, _generation_count
+    global _model, _generation_count, _model_load_mode
     _model = None
     _generation_count = 0
+    _model_load_mode = "not_loaded"
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
@@ -115,7 +119,7 @@ def _unload() -> None:
 
 
 def _load_model() -> Any:
-    global _model
+    global _model, _model_load_mode
     if _model is not None:
         return _model
     if not torch.cuda.is_available():
@@ -124,10 +128,21 @@ def _load_model() -> Any:
     _ensure_storage()
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-    _model = ChatterboxMultilingualTTS.from_pretrained(
-        device="cuda",
-        t3_model=MODEL_VARIANT,
-    )
+    from_pretrained = ChatterboxMultilingualTTS.from_pretrained
+    parameters = inspect.signature(from_pretrained).parameters
+
+    if "t3_model" in parameters:
+        _model = from_pretrained(
+            device="cuda",
+            t3_model=MODEL_VARIANT,
+        )
+        _model_load_mode = "configured_t3_model"
+    else:
+        _model = from_pretrained(
+            device="cuda",
+        )
+        _model_load_mode = "package_default_no_t3_model_parameter"
+
     return _model
 
 
@@ -345,6 +360,7 @@ def _synthesize(data: dict[str, Any]) -> dict[str, Any]:
         "worker_build": WORKER_BUILD,
         "model": MODEL_NAME,
         "model_variant": MODEL_VARIANT,
+        "model_load_mode": _model_load_mode,
         "model_license": MODEL_LICENSE,
         "language": language,
         "sample_rate": int(model.sr),

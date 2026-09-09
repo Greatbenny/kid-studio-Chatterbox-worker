@@ -18,7 +18,7 @@ import runpod
 import torch
 
 SERVICE = "kid-studio-chatterbox-worker"
-WORKER_BUILD = "chatterbox-multilingual-v3-3"
+WORKER_BUILD = "chatterbox-multilingual-v3-4"
 MODEL_NAME = "ResembleAI/chatterbox"
 MODEL_LICENSE = "MIT"
 MODEL_VARIANT = os.getenv("CHATTERBOX_T3_MODEL", "v3")
@@ -124,12 +124,9 @@ def _load_model() -> Any:
     _ensure_storage()
     from chatterbox.mtl_tts import ChatterboxMultilingualTTS
 
-    # chatterbox-tts==0.1.7 does not accept a t3_model keyword here.
-    # Keep MODEL_VARIANT as worker metadata/configuration information, but do
-    # not pass an unsupported constructor argument that prevents all speech
-    # synthesis from starting.
     _model = ChatterboxMultilingualTTS.from_pretrained(
         device="cuda",
+        t3_model=MODEL_VARIANT,
     )
     return _model
 
